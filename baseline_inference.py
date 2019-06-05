@@ -5,6 +5,7 @@ import csv
 import logging
 import numpy as np
 import regex
+import random
 
 # QNLI training and test data path
 TRAINING_DATAFILE = "/home/ec2-user/QNLI/train.tsv"
@@ -19,9 +20,9 @@ logger.addHandler(logging.StreamHandler())
 logger.setLevel(logging.DEBUG)
 tf.logging.set_verbosity(logging.ERROR)
 
-# the maximimum length for the question sequence
+# hyperparameters
 MAX_SEQ_LENGTH = 100
-BATCH_SIZE = 64
+BATCH_SIZE = 16
 EPOCHS = 100
 
 # read QNLI dataset from GLUE benchmark
@@ -55,27 +56,38 @@ def train():
     
     logger.debug("loading data")
     # load data
-    questions, answers, labels = read_QNLI_dataset(TRAINING_DATAFILE)
-    
-    logger.debug("preprocessing data")
-    # batchify training and testing data
     train_questions, train_answers, train_labels = read_QNLI_dataset(TRAINING_DATAFILE)
     test_questions, test_answers, test_labels = read_QNLI_dataset(DEV_DATAFILE)
-    training_batches = MagnitudeUtils.batchify([train_questions, train_answers], train_labels, BATCH_SIZE)
-    testing_batches = MagnitudeUtils.batchify([test_questions, test_answers], test_labels, BATCH_SIZE)
-
+    # batches per epoch
     num_batches_per_epoch_train = int(math.ceil(len(train_questions)/float(BATCH_SIZE)))
     num_batches_per_epoch_test = int(math.ceil(len(test_questions)/float(BATCH_SIZE)))
-
-    # batch generator
-    # Generates batches of the transformed training data
-    train_batch_generator = (
-      (
-        vectors.query(X_train_batch), # Magnitude will handle converting the 2D array of text into the 3D word vector representations!
-        MagnitudeUtils.to_categorical(y_train_batch, num_outputs) # Magnitude will handle converting the class labels into one-hot encodings!
-      ) for X_train_batch, y_train_batch in training_batches
-    )
-
+    
+    # batchifying data
+    def batchify(questions, answers, labels, batch_size=BATCH_SIZE):
+        random.shuffle(questions)
+        random.shuffle(answers)
+        random.shuffle(labels)
+        questions_batches = []
+        answers_batches = []
+        labels_batches = []
+        index = 0
+        iterations = int(math.floor(len(questions) / batch_size))
+        for i in range(iterations):
+            questions_batches.append(questions[index:index+BATCH_SIZE])
+            answers_batches.append(answers[index:index+BATCH_SIZE])
+            labels_batches.append(labels[index:index+BATCH_SIZE])
+            index = index + BATCH_SIZE
+        return questions_batches, answers_batches, labels_batches
+    
+    # generator for batches of training and testing data
+    def batch_generator(questions, answers, labels):
+        questions_batches, answers_batches, labels_batches = batchify(questions, answers, labels)
+        while True:
+            for question_batch, answer_batch, label_batch in zip(questions_batches, answers_batches, labels_batches):
+                yield ([tf.keras.preprocessing.sequence.pad_sequences(vectors.query(question_batch), maxlen=MAX_SEQ_LENGTH, dtype='float32', padding='post', truncating='post', value=0),
+                        tf.keras.preprocessing.sequence.pad_sequences(vectors.query(answer_batch), maxlen=MAX_SEQ_LENGTH, dtype='float32', padding='post', truncating='post', value=0)],
+                        label_batch)
+                        
     logger.debug("building model")
     # u = question sequence embedding (MAX_SEQ_LENGTH, 300) -> 1500D bidirectional LSTM -> maxpooling
     q_in = tf.keras.layers.Input(shape=(MAX_SEQ_LENGTH, vectors.dim))
@@ -107,15 +119,15 @@ def train():
     
     logger.debug("fitting model")
     model.fit_generator(
-    generator = train_batch_generator,
+    generator = batch_generator(train_questions, train_answers, train_labels),
     steps_per_epoch = num_batches_per_epoch_train,
-    validation_data = test_batch_generator,
+    validation_data = batch_generator(test_questions, test_answers, test_labels),
     validation_steps = num_batches_per_epoch_test,
     epochs = EPOCHS,
 )
     
     logger.debug("saving model to {MODEL_FILE}")
-    model.save(MODEL.FILE)
+    model.save(MODEL_FILE)
     logger.debug("finished training")
 
 train()
